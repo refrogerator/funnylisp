@@ -1,0 +1,4 @@
+- error type that if used as a value crashes the program for both fast iteration but also safe programming
+- additional compiler option that enforces error type handling (and a way to force-ignore it)
+- when discarded at the callsite, the error check doesn't even run (optional)
+- MC2 GC
