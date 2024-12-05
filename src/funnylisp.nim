@@ -3,6 +3,7 @@ import std/tables
 from std/strutils import parseFloat, parseInt, join
 from std/sequtils import map, mapIt
 import std/strformat
+import std/cmdline
 
 type
   NodeKind = enum
@@ -15,12 +16,16 @@ type
     nkBuiltinMacro,
     nkBool,
     nkLambda,
+    nkCons,
     nkNone
   Node = ref NodeObj
   Func = object
     args: seq[string]
     body: seq[Node]
   SymbolStack = seq[ref Table[string, Node]]
+  Cons = object
+    left: Node
+    right: Node
   NodeObj = object
     case kind: NodeKind
     of nkInt: intVal: int
@@ -32,6 +37,7 @@ type
     of nkBuiltin: builtinVal: proc(n: seq[Node]): Node
     of nkBuiltinMacro: builtinMacroVal: proc(n: seq[Node], locals: var SymbolStack): Node
     of nkLambda: lambdaVal: Func
+    of nkCons: consVal: Cons
     of nkNone: none: int
 
 proc intNode(val: int): Node =
@@ -61,6 +67,9 @@ proc boolNode(val: bool): Node =
 proc lambdaNode(args: seq[string], body: seq[Node]): Node =
   Node(kind: nkLambda, lambdaVal: Func(args: args, body: body))
 
+proc consNode(left: Node, right: Node): Node =
+  Node(kind: nkCons, consVal: Cons(left: left, right: right))
+
 proc noneNode(): Node =
   Node(kind: nkNone)
 
@@ -83,53 +92,84 @@ proc findSymbol(symbol: string, globals: ref Table[string, Node], locals: var Sy
     else:
       raise newException(SymbolNotFound, fmt"symbol {symbol} not found")
 
-proc readTemp(temp: string): Node =
+proc readTemp(temp: string, quote: bool): Node =
   # try: Node(kind: nkInt, intVal: parseInt(temp))
   # except:
-  try: floatNode(parseFloat(temp))
-  except: symbolNode(temp)
+  let res = try: floatNode(parseFloat(temp))
+            except: symbolNode(temp)
+  if quote:
+    listNode(@[symbolNode("quote"), res])
+  else:
+    res
 
 proc read(s: string): seq[Node] =
   var listStack: seq[seq[Node]] = @[]
+  var listQuoteStack: seq[bool] = @[]
   var res: seq[Node] = @[]
   var temp = ""
   var isString = false
+  var quote = false
   for c in s:
     if isString:
       if c == '"':
-        listStack[^1].add(stringNode(temp))
+        if listStack.len() > 0:
+          listStack[^1].add(stringNode(temp))
+        else:
+          res.add(stringNode(temp))
+        quote = false
         reset temp
         isString = false
       else:
         temp.add(c)
     else:
       case c:
+        of '\'': # TODO: add reader macros
+          quote = true
         of '(':
+          listQuoteStack.add(quote)
+          quote = false
+
           if temp.len() != 0:
-            listStack[^1].add(readTemp(temp))
+            if listStack.len() > 0:
+              listStack[^1].add(readTemp(temp, quote))
+            else:
+              res.add(readTemp(temp, quote))
+            quote = false
             reset temp
+
           listStack.add(@[])
         of ')':
           if temp.len() != 0:
-            listStack[^1].add(readTemp(temp))
+            listStack[^1].add(readTemp(temp, quote))
+            quote = false
             reset temp
+          var tempL = listStack.pop()
+          if listQuoteStack.pop():
+            tempL.insert(symbolNode("quote"), 0)
           if listStack.len() > 1:
-            listStack[^2].add(listNode(listStack.pop()))
+            listStack[^2].add(listNode(tempL))
+          elif listStack.len() == 1:
+            listStack[0].add(listNode(tempL))
           else:
-            res.add(Node(kind: nkList, listVal: listStack.pop()))
+            res.add(listNode(tempL))
         of '"':
           isString = true
           if temp.len() != 0:
-            listStack[^1].add(readTemp(temp))
+            listStack[^1].add(readTemp(temp, quote))
+            quote = false
             reset temp
         of ' ':
           if temp.len() != 0:
-            listStack[^1].add(readTemp(temp))
+            listStack[^1].add(readTemp(temp, quote))
+            quote = false
             reset temp
+        of '\n':
+          continue
         else:
           temp.add(c)
   if temp.len() != 0:
-    res.add(readTemp(temp))
+    res.add(readTemp(temp, quote))
+    quote = false
     reset temp
   res
 
@@ -170,6 +210,43 @@ proc evalL(nodes: seq[Node], globals: ref Table[string, Node], locals: var Symbo
   lastEval
 
 proc printL(nodes: seq[Node]) =
+  for node in nodes:
+    case node.kind:
+      of nkLambda:
+        stdout.write "(lambda ("
+        stdout.write join(node.lambdaVal.args, " ")
+        stdout.write "))"
+      of nkBool:
+        if node.boolVal:
+          stdout.write "t"
+        else:
+          stdout.write "f"
+      of nkNone:
+        stdout.write "none"
+      of nkSymbol:
+        stdout.write node.symVal
+      of nkInt:
+        stdout.write $node.intVal
+      of nkFloat:
+        stdout.write $node.floatVal
+      of nkList:
+        stdout.write '('
+        printL node.listVal
+        stdout.write ')'
+      of nkBuiltin:
+        stdout.write "<builtin function>"
+      of nkBuiltinMacro:
+        stdout.write "<builtin macro>"
+      of nkString:
+        stdout.write node.strVal
+      of nkCons:
+        stdout.write '('
+        printL @[node.consVal.left]
+        stdout.write " . "
+        printL @[node.consVal.right]
+        stdout.write ')'
+
+proc pprintL(nodes: seq[Node]) =
   var first = true
   for node in nodes:
     if first:
@@ -196,16 +273,22 @@ proc printL(nodes: seq[Node]) =
         stdout.write $node.floatVal
       of nkList:
         stdout.write '('
-        printL node.listVal
+        pprintL node.listVal
         stdout.write ')'
       of nkBuiltin:
-        stdout.write "<builtin>"
+        stdout.write "<builtin function>"
       of nkBuiltinMacro:
         stdout.write "<builtin macro>"
       of nkString:
         stdout.write '"'
         stdout.write node.strVal
         stdout.write '"'
+      of nkCons:
+        stdout.write '('
+        pprintL @[node.consVal.left]
+        stdout.write " . "
+        pprintL @[node.consVal.right]
+        stdout.write ')'
 
 var globals = newTable[string, Node]()
 
@@ -218,12 +301,26 @@ proc asNumber(node: Node): float =
     else:
       raise newException(TypeMismatch, fmt"type {node.kind} is not a number")
 
+proc asString(node: Node): string =
+  case node.kind:
+    of nkString:
+      node.strVal
+    else:
+      raise newException(TypeMismatch, fmt"type {node.kind} is not a string")
+
 proc asSymbol(node: Node): string =
   case node.kind:
     of nkSymbol:
       node.symVal
     else:
       raise newException(TypeMismatch, fmt"type {node.kind} is not a symbol")
+
+proc asCons(node: Node): Cons =
+  case node.kind:
+    of nkCons:
+      node.consVal
+    else:
+      raise newException(TypeMismatch, fmt"type {node.kind} is not a pair")
 
 proc asList(node: Node): seq[Node] =
   case node.kind:
@@ -236,7 +333,7 @@ globals["define"] = builtinMacroNode(proc(a: seq[Node], locals: var SymbolStack)
     if a.len() != 2:
       raise newException(ArityMismatch, fmt"define called with {a.len()} arguments but needs 2")
 
-    print a[1]
+    # print a[1]
     globals[asSymbol(a[0])] = evalL(@[a[1]], globals, locals)
     noneNode()
 )
@@ -249,6 +346,48 @@ globals["quote"] = builtinMacroNode(proc(a: seq[Node], locals: var SymbolStack):
     else:
       listNode(a)
 )
+
+globals["vector"] = builtinMacroNode(proc(a: seq[Node], locals: var SymbolStack): Node =
+    listNode(a)
+)
+
+globals["cons"] = builtinNode(proc(a: seq[Node]): Node =
+    if a.len() != 2:
+      raise newException(ArityMismatch, fmt"cons has to be called with 2 arguments")
+    else:
+      consNode(a[0], a[1])
+)
+
+globals["car"] = builtinNode(proc(a: seq[Node]): Node =
+    if a.len() != 1:
+      raise newException(ArityMismatch, fmt"car has to be called with 1 argument")
+    else:
+      asCons(a[0]).left
+)
+
+globals["cdr"] = builtinNode(proc(a: seq[Node]): Node =
+    if a.len() != 1:
+      raise newException(ArityMismatch, fmt"cdr has to be called with 1 argument")
+    else:
+      asCons(a[0]).right
+)
+
+globals["left"] = globals["car"]
+globals["right"] = globals["cdr"]
+
+globals["vector-ref"] = builtinNode(proc(a: seq[Node]): Node =
+    if a.len() != 2:
+      raise newException(ArityMismatch, fmt"vector-ref has to be called with 2 arguments")
+    else:
+      asList(a[0])[int(asNumber(a[1]))]
+)
+
+# globals["vector-set!"] = builtinNode(proc(a: seq[Node]): Node =
+#     if a.len() != 3:
+#       raise newException(ArityMismatch, fmt"vector-set! has to be called with 3 arguments")
+#     else:
+#       asList(a[0])[int(asNumber(a[1]))].set(a[2])
+# )
 
 globals["lambda"] = builtinMacroNode(proc(a: seq[Node], locals: var SymbolStack): Node =
     if a.len() < 2:
@@ -303,6 +442,38 @@ globals["/"] = builtinNode(proc(a: seq[Node]): Node =
     floatNode(res)
 )
 
+globals[">"] = builtinNode(proc(a: seq[Node]): Node =
+    var res = asNumber(a[0])
+    for node in a[1..^1]:
+      if res <= asNumber(node):
+        return boolNode(false)
+    boolNode(true)
+)
+
+globals["<"] = builtinNode(proc(a: seq[Node]): Node =
+    var res = asNumber(a[0])
+    for node in a[1..^1]:
+      if res >= asNumber(node):
+        return boolNode(false)
+    boolNode(true)
+)
+
+globals[">="] = builtinNode(proc(a: seq[Node]): Node =
+    var res = asNumber(a[0])
+    for node in a[1..^1]:
+      if res < asNumber(node):
+        return boolNode(false)
+    boolNode(true)
+)
+
+globals["<="] = builtinNode(proc(a: seq[Node]): Node =
+    var res = asNumber(a[0])
+    for node in a[1..^1]:
+      if res > asNumber(node):
+        return boolNode(false)
+    boolNode(true)
+)
+
 globals["="] = builtinNode(proc(a: seq[Node]): Node =
     var res = asNumber(a[0])
     for node in a[1..^1]:
@@ -311,13 +482,48 @@ globals["="] = builtinNode(proc(a: seq[Node]): Node =
     boolNode(true)
 )
 
-globals["print"] = builtinNode(proc(a: seq[Node]): Node =
+globals["readline"] = builtinNode(proc(a: seq[Node]): Node =
+    stringNode(stdin.readLine())
+)
+
+globals["readfile"] = builtinNode(proc(a: seq[Node]): Node =
+    stringNode(readFile(asString(a[0])))
+)
+
+globals["read"] = builtinNode(proc(a: seq[Node]): Node =
+    if a.len() != 1:
+      raise newException(ArityMismatch, "read has to be called with 1 argument")
+    let res = read(asString(a[0]))
+    if res.len() == 1:
+      res[0]
+    else:
+      listNode(res)
+)
+
+globals["eval"] = builtinMacroNode(proc(a: seq[Node], locals: var SymbolStack): Node =
+    if a.len() != 1:
+      raise newException(ArityMismatch, "read has to be called with 1 argument")
+    evalL(asList(evalL(@[a[0]], globals, locals)), globals, locals)
+)
+
+globals["write"] = builtinNode(proc(a: seq[Node]): Node =
     printL(a)
     noneNode()
 )
 
-globals["println"] = builtinNode(proc(a: seq[Node]): Node =
+globals["writeln"] = builtinNode(proc(a: seq[Node]): Node =
     printL(a)
+    echo ""
+    noneNode()
+)
+
+globals["print"] = builtinNode(proc(a: seq[Node]): Node =
+    pprintL(a)
+    noneNode()
+)
+
+globals["println"] = builtinNode(proc(a: seq[Node]): Node =
+    pprintL(a)
     echo ""
     noneNode()
 )
@@ -329,14 +535,19 @@ var locals: SymbolStack = @[]
 
 # discard evalL(read "(define add (lambda (a b) (+ a b)))", globals, locals)
 
-while true:
-  stdout.write "lol> "
+case commandLineParams()[0]:
+  of "run":
+    discard evalL(read readFile commandLineParams()[1], globals, locals)
+  of "repl":
+    while true:
+      stdout.write "lol> "
 
-  try:
-    printL @[evalL(read readLine stdin, globals, locals)]
-    # print read readLine stdin
-    echo ""
-  except EOFError:
-    echo ""
-    echo "goodbye"
-    quit 1
+      try:
+        pprintL @[evalL(read readLine stdin, globals, locals)]
+        # printL read readLine stdin
+        # print read readLine stdin
+        echo ""
+      except EOFError:
+        echo ""
+        echo "goodbye"
+        quit 1

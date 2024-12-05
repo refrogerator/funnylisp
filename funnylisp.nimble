@@ -5,7 +5,7 @@ author        = "refrogerator"
 description   = "A new awesome nimble package"
 license       = "MIT"
 srcDir        = "src"
-bin           = @["newlisp"]
+bin           = @["funnylisp"]
 
 
 # Dependencies
