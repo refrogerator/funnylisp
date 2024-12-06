@@ -4,6 +4,7 @@ from std/strutils import parseFloat, parseInt, join
 from std/sequtils import map, mapIt
 import std/strformat
 import std/cmdline
+import std/times
 
 type
   NodeKind = enum
@@ -107,9 +108,14 @@ proc read(s: string): seq[Node] =
   var listQuoteStack: seq[bool] = @[]
   var res: seq[Node] = @[]
   var temp = ""
+  var isComment = false
   var isString = false
   var quote = false
   for c in s:
+    if isComment:
+      if c == '\n':
+        isComment = false
+      continue
     if isString:
       if c == '"':
         if listStack.len() > 0:
@@ -123,6 +129,9 @@ proc read(s: string): seq[Node] =
         temp.add(c)
     else:
       case c:
+        of ';':
+          isComment = true
+          continue
         of '\'': # TODO: add reader macros
           quote = true
         of '(':
@@ -146,10 +155,8 @@ proc read(s: string): seq[Node] =
           var tempL = listStack.pop()
           if listQuoteStack.pop():
             tempL.insert(symbolNode("quote"), 0)
-          if listStack.len() > 1:
-            listStack[^2].add(listNode(tempL))
-          elif listStack.len() == 1:
-            listStack[0].add(listNode(tempL))
+          if listStack.len() > 0:
+            listStack[^1].add(listNode(tempL))
           else:
             res.add(listNode(tempL))
         of '"':
@@ -380,6 +387,14 @@ globals["vector-ref"] = builtinNode(proc(a: seq[Node]): Node =
       raise newException(ArityMismatch, fmt"vector-ref has to be called with 2 arguments")
     else:
       asList(a[0])[int(asNumber(a[1]))]
+)
+
+globals["time"] = builtinMacroNode(proc(a: seq[Node], locals: var SymbolStack): Node =
+    let time = cpuTime()
+    let ret = evalL(a, globals, locals)
+    echo &"Time taken: {cpuTime() - time:<.4f}s"
+    echo &"Time taken: {cpuTime() - time}s"
+    ret
 )
 
 # globals["vector-set!"] = builtinNode(proc(a: seq[Node]): Node =
